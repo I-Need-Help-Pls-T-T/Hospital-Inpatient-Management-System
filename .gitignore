@@ -208,3 +208,6 @@ __marimo__/
 
 # Проектные данные
 backups/
+
+git rm -r --cached .
+git add .
