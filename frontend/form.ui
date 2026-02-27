@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>800</width>
+    <height>600</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>MainWindow</string>
+  </property>
+  <widget class="QWidget" name="centralwidget"/>
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>800</width>
+     <height>17</height>
+    </rect>
+   </property>
+   <widget class="QMenu" name="menu_file">
+    <property name="title">
+     <string>Файл</string>
+    </property>
+    <addaction name="action_exit"/>
+   </widget>
+   <widget class="QMenu" name="menu_directory">
+    <property name="title">
+     <string>Справочники</string>
+    </property>
+    <addaction name="action_position"/>
+    <addaction name="action_department"/>
+    <addaction name="action_room"/>
+    <addaction name="action_ward"/>
+    <addaction name="action_staff_role"/>
+   </widget>
+   <widget class="QMenu" name="menu_main">
+    <property name="title">
+     <string>Ввод</string>
+    </property>
+    <addaction name="action_patient"/>
+    <addaction name="action_staff"/>
+    <addaction name="action_hospitalization"/>
+    <addaction name="action_med_entry"/>
+    <addaction name="action_medication_order"/>
+    <addaction name="action_payment"/>
+    <addaction name="action_patient_admission"/>
+    <addaction name="action_admission_team"/>
+   </widget>
+   <widget class="QMenu" name="menu_help">
+    <property name="title">
+     <string>Помощь</string>
+    </property>
+    <addaction name="action_help"/>
+   </widget>
+   <addaction name="menu_file"/>
+   <addaction name="menu_directory"/>
+   <addaction name="menu_main"/>
+   <addaction name="menu_help"/>
+  </widget>
+  <widget class="QStatusBar" name="statusbar"/>
+  <action name="action">
+   <property name="text">
+    <string>Файл</string>
+   </property>
+  </action>
+  <action name="action_help">
+   <property name="text">
+    <string>О программе</string>
+   </property>
+  </action>
+  <action name="action_exit">
+   <property name="text">
+    <string>Выход</string>
+   </property>
+  </action>
+  <action name="action_position">
+   <property name="text">
+    <string>Должности</string>
+   </property>
+  </action>
+  <action name="action_department">
+   <property name="text">
+    <string>Отделения</string>
+   </property>
+  </action>
+  <action name="action_room">
+   <property name="text">
+    <string>Помещения</string>
+   </property>
+  </action>
+  <action name="action_ward">
+   <property name="text">
+    <string>Палаты</string>
+   </property>
+  </action>
+  <action name="action_staff_role">
+   <property name="text">
+    <string>Должности перонала</string>
+   </property>
+  </action>
+  <action name="action_patient">
+   <property name="text">
+    <string>Пациенты</string>
+   </property>
+  </action>
+  <action name="action_staff">
+   <property name="text">
+    <string>Персонал</string>
+   </property>
+  </action>
+  <action name="action_hospitalization">
+   <property name="text">
+    <string>Госпитализация</string>
+   </property>
+  </action>
+  <action name="action_med_entry">
+   <property name="text">
+    <string>Запись в истории болезни</string>
+   </property>
+  </action>
+  <action name="action_medication_order">
+   <property name="text">
+    <string>Лист назначения</string>
+   </property>
+  </action>
+  <action name="action_payment">
+   <property name="text">
+    <string>Оплата</string>
+   </property>
+  </action>
+  <action name="action_patient_admission">
+   <property name="text">
+    <string>Прием пациентов</string>
+   </property>
+  </action>
+  <action name="action_admission_team">
+   <property name="text">
+    <string>Дежурная бригада</string>
+   </property>
+  </action>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

@@ -1,0 +1,73 @@
+[project]
+name = "HIMS"
+version = "0.1.0"
+description = "Госпитальная информационная система"
+authors = [
+    {name = "I-Need-Help-Pls-T-T", email = "nagat.mariya@gmail.com"},
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pyside6-project]
+files = [
+    ".env",
+    ".gitignore",
+    "backend/admin/create_dump.py",
+    "backend/admin/routers/system.py",
+    "backend/crud.py",
+    "backend/database.py",
+    "backend/main.py",
+    "backend/models.py",
+    "backend/requirements",
+    "backend/routers/admission_teams.py",
+    "backend/routers/admissions.py",
+    "backend/routers/departments.py",
+    "backend/routers/hospitalizations.py",
+    "backend/routers/med_entries.py",
+    "backend/routers/medication_orders.py",
+    "backend/routers/patients.py",
+    "backend/routers/payments.py",
+    "backend/routers/positions.py",
+    "backend/routers/rooms.py",
+    "backend/routers/staff.py",
+    "backend/routers/staff_roles.py",
+    "backend/routers/wards.py",
+    "backend/schemas.py",
+    "frontend/api_client.py",
+    "frontend/form.ui",
+    "frontend/mainwindow.py",
+    "frontend/ui_form.py",
+    "main.py",
+    "test-server/backend/admin/routers/test_system.py",
+    "test-server/backend/admin/test_create_dump.py",
+    "test-server/backend/conftest.py",
+    "test-server/backend/routers/test_admission_teams.py",
+    "test-server/backend/routers/test_admissions.py",
+    "test-server/backend/routers/test_departments.py",
+    "test-server/backend/routers/test_hospitalizations.py",
+    "test-server/backend/routers/test_med_entries.py",
+    "test-server/backend/routers/test_medication_orders.py",
+    "test-server/backend/routers/test_patients.py",
+    "test-server/backend/routers/test_payments.py",
+    "test-server/backend/routers/test_positions.py",
+    "test-server/backend/routers/test_rooms.py",
+    "test-server/backend/routers/test_staff.py",
+    "test-server/backend/routers/test_staff_roles.py",
+    "test-server/backend/routers/test_wards.py",
+    "test-server/backend/test_main.py",
+]
+
+[tool.pyside6-project.watcher]
+auto-add = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "asyncio: mark test as asyncio",
+]
+filterwarnings = [
+    "ignore::sqlalchemy.exc.MovedIn20Warning",
+    "ignore::sqlalchemy.exc.LegacyAPIWarning",
+]
