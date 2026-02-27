@@ -1,2 +1,0 @@
-set PYTHONPATH=.;backend
-python -m pytest --cov=backend --cov-report=term-missing test-server/backend/
