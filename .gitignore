@@ -211,3 +211,8 @@ backups/
 
 git rm -r --cached .
 git add .
+
+# Qt Creator specifics
+.qtcreator/
+*.user
+.pyside6-project.watcher
