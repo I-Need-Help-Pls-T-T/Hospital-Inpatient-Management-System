@@ -38,7 +38,6 @@ class Department(DepartmentBase):
 class PositionBase(BaseModel):
     name: str
     med_education: bool = True
-    lvl_responsibility: Optional[int] = None
     description: Optional[str] = None
 
 class PositionCreate(PositionBase):
@@ -82,14 +81,22 @@ class StaffBase(BaseModel):
     email: Optional[str] = None
     condition: Optional[StaffConditionEnum] = StaffConditionEnum.Активен
     room_id: Optional[int] = None
-    position_id: Optional[int] = None
+    login: Optional[str] = None
+    access_level: int = 0
 
 class StaffCreate(StaffBase):
-    pass
+    password: str
 
 class Staff(StaffBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
+
+class StaffUpdate(BaseModel):
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    condition: Optional[StaffConditionEnum] = None
+    access_level: Optional[int] = None
+    password: Optional[str] = None
 
 class StaffShort(BaseModel):
     full_name: str
@@ -123,22 +130,21 @@ class HospitalizationBase(BaseModel):
     care_type: Optional[str] = None
     outcome: Optional[str] = None
     treatment_summary: Optional[str] = None
-    payments: List[Payment] = []
-    @computed_field
-    @property
-    def is_paid(self) -> bool:
-        return len(self.payments) > 0 if self.payments else False
+
 
 class HospitalizationCreate(HospitalizationBase):
     pass
 
 class Hospitalization(HospitalizationBase):
     id: int
+    payments: List[Payment] = []
     @computed_field
     @property
     def is_paid(self) -> bool:
-        payments = getattr(self, "payments", [])
-        return len(payments) > 0 if payments else False
+        # Логика Pydantic для отображения в JSON
+        return len(self.payments) > 0
+
+    model_config = ConfigDict(from_attributes=True)
 
 class HospitalizationFull(Hospitalization):
     patient: Optional[PatientShort] = None
@@ -250,3 +256,24 @@ class StaffRoleCreate(StaffRoleBase):
 
 class StaffRole(StaffRoleBase):
     model_config = ConfigDict(from_attributes=True)
+
+# Фидбэк
+class FeedbackCreate(BaseModel):
+    subject: str
+    description: str
+    feedback_type: str = "Ошибка"
+    section: Optional[str] = None
+
+
+class FeedbackResponse(BaseModel):
+    id: int
+    staff_id: Optional[int]
+    subject: str
+    description: str
+    feedback_type: str
+    section: Optional[str]
+    created_at: datetime
+    is_read: bool
+
+    class Config:
+        from_attributes = True

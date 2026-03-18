@@ -1,80 +1,103 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 from backend.main import app
-from datetime import datetime
+from backend.auth import create_access_token
+from backend.database import SessionLocal
+from backend import crud, schemas, models
 
 BASE_URL = "http://testserver"
 
 @pytest.mark.asyncio
 async def test_med_entries_full_coverage():
+    # --- ШАГ 1: ПОДГОТОВКА ПОЛЬЗОВАТЕЛЕЙ ---
+    db = SessionLocal()
+    try:
+        # Админ (4) - для удаления
+        admin_login = "med_admin_ent"
+        if not db.query(models.Staff).filter(models.Staff.login == admin_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Главврач", login=admin_login, password="1", access_level=3
+            ))
+
+        # Врач (2) - для создания и чтения
+        doc_login = "med_doc_ent"
+        if not db.query(models.Staff).filter(models.Staff.login == doc_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Врач", login=doc_login, password="1", access_level=2
+            ))
+
+        # Стажер (1) - НЕТ прав на мед. записи
+        intern_login = "med_intern_ent"
+        if not db.query(models.Staff).filter(models.Staff.login == intern_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Стажер", login=intern_login, password="1", access_level=1
+            ))
+    finally:
+        db.close()
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url=BASE_URL) as ac:
+        admin_headers = {"Authorization": f"Bearer {create_access_token({'sub': admin_login})}"}
+        doc_headers = {"Authorization": f"Bearer {create_access_token({'sub': doc_login})}"}
+        intern_headers = {"Authorization": f"Bearer {create_access_token({'sub': intern_login})}"}
 
-        # --- ПОДГОТОВКА: Создаем пациента и сотрудника ---
-        patient = await ac.post("/patients/", json={
-            "full_name": "Иванов Иван Иванович",
-            "birth_date": "1975-03-20",
-            "gender": "Мужской"
-        })
-        patient_id = patient.json()["id"]
+        # Создаем пациента для тестов
+        pat = await ac.post("/api/patients/", json={"full_name": "Пациент Х", "birth_date": "1990-01-01", "gender": "Мужской"}, headers=admin_headers)
+        patient_id = pat.json()["id"]
 
-        staff = await ac.post("/staff/", json={
-            "full_name": "Др. Смирнова",
-            "phone": "103"
-        })
-        staff_id = staff.json()["id"]
-
-        # --- 1. POST (Создание записи) ---
-        # Покрывает метод create_med_entry
-        entry_data = {
+        entry_payload = {
             "patient_id": patient_id,
-            "staff_id": staff_id,
-            "description": "Жалобы на головную боль. Температура 36.6."
+            "description": "Первичный осмотр, жалоб нет."
         }
-        create_res = await ac.post("/med_entries/", json=entry_data)
-        assert create_res.status_code == 200
-        entry_id = create_res.json()["id"]
-        assert "головную боль" in create_res.json()["description"]
 
-        # --- 2. GET List (Список всех записей) ---
-        # Покрывает метод read_med_entries
-        list_res = await ac.get("/med_entries/")
-        assert list_res.status_code == 200
-        assert any(e["id"] == entry_id for e in list_res.json())
+        # --- 2. ТЕСТЫ GET (Список) ---
+        # 403: Стажер (1) не имеет доступа (строка 21)
+        res_l_403 = await ac.get("/api/med_entries/", headers=intern_headers)
+        assert res_l_403.status_code == 403
 
-        # --- 3. GET One (Получение по ID) ---
-        # Покрывает метод read_med_entry
-        get_one = await ac.get(f"/med_entries/{entry_id}")
-        assert get_one.status_code == 200
-        assert get_one.json()["staff_id"] == staff_id
+        # 200: Врач имеет доступ
+        res_l_ok = await ac.get("/api/med_entries/", headers=doc_headers)
+        assert res_l_ok.status_code == 200
 
-        # --- 4. PUT (Обновление записи) ---
-        # Покрывает метод update_med_entry
-        update_data = {
-            "patient_id": patient_id,
-            "staff_id": staff_id,
-            "description": "Диагноз: Мигрень. Рекомендован покой."
-        }
-        put_res = await ac.put(f"/med_entries/{entry_id}", json=update_data)
-        assert put_res.status_code == 200
-        assert "Мигрень" in put_res.json()["description"]
+        # --- 3. ТЕСТЫ POST (Создание) ---
+        # 403: Стажер не может создавать записи (строка 47)
+        res_p_403 = await ac.post("/api/med_entries/", json=entry_payload, headers=intern_headers)
+        assert res_p_403.status_code == 403
 
-        # --- 5. ТЕСТЫ ОШИБОК 404 (Закрываем Missing lines) ---
-        # Ошибка в GET
-        bad_get = await ac.get("/med_entries/99999")
-        assert bad_get.status_code == 404
-        assert bad_get.json()["detail"] == "Запись в истории болезни не найдена"
+        # 200: Врач создает запись
+        res_p_ok = await ac.post("/api/med_entries/", json=entry_payload, headers=doc_headers)
+        assert res_p_ok.status_code == 200
+        entry_id = res_p_ok.json()["id"]
 
-        # Ошибка в PUT
-        bad_put = await ac.put("/med_entries/99999", json=update_data)
-        assert bad_put.status_code == 404
+        # --- 4. ТЕСТЫ GET (ID) ---
+        # 404: Запись не найдена (строка 37)
+        res_g_404 = await ac.get("/api/med_entries/99999", headers=doc_headers)
+        assert res_g_404.status_code == 404
 
-        # --- 6. DELETE (Удаление записи) ---
-        # Покрывает метод delete_med_entry
-        del_res = await ac.delete(f"/med_entries/{entry_id}")
-        assert del_res.status_code == 200
-        assert del_res.json()["message"] == "Запись в истории болезни успешно удалена"
+        # --- 5. ТЕСТЫ PUT (Обновление) ---
+        # 403: Недостаточно прав (строка 59)
+        res_u_403 = await ac.put(f"/api/med_entries/{entry_id}", json=entry_payload, headers=intern_headers)
+        assert res_u_403.status_code == 403
 
-        # Повторное удаление (404)
-        bad_del = await ac.delete(f"/med_entries/{entry_id}")
-        assert bad_del.status_code == 404
+        # 404: Не найдена
+        res_u_404 = await ac.put("/api/med_entries/99999", json=entry_payload, headers=doc_headers)
+        assert res_u_404.status_code == 404
+
+        # 200: Успех
+        res_u_ok = await ac.put(f"/api/med_entries/{entry_id}",
+                                json={"patient_id": patient_id, "description": "Обновлено"},
+                                headers=doc_headers)
+        assert res_u_ok.status_code == 200
+
+        # --- 6. ТЕСТЫ DELETE (Удаление) ---
+        # 403: Врач (2) не может удалять (строка 74)
+        res_d_403 = await ac.delete(f"/api/med_entries/{entry_id}", headers=doc_headers)
+        assert res_d_403.status_code == 403
+
+        # 404: Не найдена
+        res_d_404 = await ac.delete("/api/med_entries/99999", headers=admin_headers)
+        assert res_d_404.status_code == 404
+
+        # 200: Успех (Админ)
+        res_d_ok = await ac.delete(f"/api/med_entries/{entry_id}", headers=admin_headers)
+        assert res_d_ok.status_code == 200

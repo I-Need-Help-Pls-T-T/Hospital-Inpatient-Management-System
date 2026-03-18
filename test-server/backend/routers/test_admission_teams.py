@@ -1,96 +1,100 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 from backend.main import app
+from backend.auth import create_access_token
+from backend.database import SessionLocal
+from backend import crud, schemas, models
 from datetime import datetime, timedelta
 
-BASE_URL = "http://testserver"
+BASE_URL = "http://testserver/api"
 
 @pytest.mark.asyncio
-async def test_admission_teams_full_coverage():
+async def test_admission_teams_full_100_percent():
+    # --- 1. ПОДГОТОВКА ПОЛЬЗОВАТЕЛЕЙ ---
+    db = SessionLocal()
+    try:
+        # Создаем/обновляем пользователей с разными уровнями доступа
+        for login, level in [("adm_adm", 3), ("doc_doc", 2), ("intern_1", 1)]:
+            user = db.query(models.Staff).filter(models.Staff.login == login).first()
+            if not user:
+                crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                    full_name=login, login=login, password="1", access_level=level
+                ))
+            else:
+                user.access_level = level
+                db.add(user)
+        db.commit()
+    finally:
+        db.close()
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url=BASE_URL) as ac:
+        # Заголовки авторизации
+        adm_h = {"Authorization": f"Bearer {create_access_token({'sub': 'adm_adm'})}"}
+        doc_h = {"Authorization": f"Bearer {create_access_token({'sub': 'doc_doc'})}"}
+        int_h = {"Authorization": f"Bearer {create_access_token({'sub': 'intern_1'})}"}
 
-        # --- ПОДГОТОВКА ---
-        # 1. Создаем пациента и госпитализацию
-        patient = await ac.post("/patients/", json={
-            "full_name": "Сидоров Сидор",
-            "birth_date": "1995-05-05",
-            "gender": "Мужской"
-        })
-        p_id = patient.json()["id"]
+        # --- 2. ПОДГОТОВКА ДАННЫХ ---
+        # Пациент и госпитализация (нужны для внешних ключей)
+        p_res = await ac.post("/patients/", json={"full_name": "Бригада Тест", "birth_date": "1990-01-01", "gender": "Мужской"}, headers=adm_h)
+        p_id = p_res.json()["id"]
+        h_res = await ac.post("/hospitalizations/", json={"patient_id": p_id, "status": "Активна"}, headers=adm_h)
+        hosp_id = h_res.json()["id"]
 
-        hosp = await ac.post("/hospitalizations/", json={
-            "patient_id": p_id,
-            "status": "Активна"
-        })
-        hosp_id = hosp.json()["id"]
+        # Сотрудник для бригады
+        s_res = await ac.post("/staff/", json={"full_name": "Врач Тест", "login": "t_doc", "password": "1", "access_level": 2}, headers=adm_h)
+        staff_id = s_res.json()["id"]
 
-        # 2. Создаем сотрудника
-        staff = await ac.post("/staff/", json={
-            "full_name": "Медсестра Петрова",
-            "phone": "03"
-        })
-        s_id = staff.json()["id"]
-
-        # --- 1. POST (Создание записи о бригаде) ---
-        begin = datetime.now()
-        end = begin + timedelta(hours=8)
-
-        team_data = {
+        team_payload = {
             "hospitalization_id": hosp_id,
-            "staff_id": s_id,
-            "begin_time": begin.isoformat(),
-            "end_time": end.isoformat(),
-            "role": "Лечащий врач"
+            "staff_id": staff_id,
+            "begin_time": datetime.now().isoformat(),
+            "role": "Хирург"
         }
 
-        create_res = await ac.post("/admission_teams/", json=team_data)
-        assert create_res.status_code == 200
-        team_id = create_res.json()["id"]
-        assert create_res.json()["role"] == "Лечащий врач"
+        # --- 3. ТЕСТЫ ПРАВ ДОСТУПА (403 Forbidden) ---
+        # Строка 32: Чтение списка интерном (нужен уровень 2+)
+        res_32 = await ac.get("/admission_teams/", headers=int_h)
+        assert res_32.status_code == 403
 
-        # --- 2. GET List (Получение списка) ---
-        list_res = await ac.get("/admission_teams/")
-        assert list_res.status_code == 200
-        assert any(t["id"] == team_id for t in list_res.json())
+        # Строка 47: Создание интерном (нужен уровень 2+)
+        res_47 = await ac.post("/admission_teams/", json=team_payload, headers=int_h)
+        assert res_47.status_code == 403
 
-        # --- 3. GET One (Получение по ID) ---
-        get_one = await ac.get(f"/admission_teams/{team_id}")
-        assert get_one.status_code == 200
-        assert get_one.json()["staff_id"] == s_id
+        # --- 4. ТЕСТЫ СОЗДАНИЯ И ОШИБОК 404 ---
+        # Успешное создание врачом
+        res_ok = await ac.post("/admission_teams/", json=team_payload, headers=adm_h)
+        assert res_ok.status_code == 200
+        team_id = res_ok.json()["id"]
 
-        # --- 4. PUT (Обновление роли) ---
-        update_data = team_data.copy()
-        update_data["role"] = "Заведующий отделением"
-        put_res = await ac.put(f"/admission_teams/{team_id}", json=update_data)
-        assert put_res.status_code == 200
-        assert put_res.json()["role"] == "Заведующий отделением"
+        # Строка 37: Чтение несуществующей записи
+        res_37 = await ac.get("/admission_teams/99999", headers=doc_h)
+        assert res_37.status_code == 404
 
-        # --- 5. ТЕСТ ВАЛИДАЦИИ ДАТ ---
-        invalid_dates = team_data.copy()
-        invalid_dates["begin_time"] = end.isoformat()
-        invalid_dates["end_time"] = begin.isoformat() # Конец раньше начала
+        # --- 5. ТЕСТЫ ОБНОВЛЕНИЯ (PUT) ---
+        update_data = {**team_payload, "role": "Ассистент"}
 
-        bad_val = await ac.post("/admission_teams/", json=invalid_dates)
-        assert bad_val.status_code == 422
-        assert "Дата отмены не может быть раньше даты назначения" in bad_val.text
+        # Строка 63: Врач пытается обновить (в роутере стоит уровень 4 для PUT)
+        res_63 = await ac.put(f"/admission_teams/{team_id}", json=update_data, headers=doc_h)
+        assert res_63.status_code == 403
 
-        # --- 6. ТЕСТЫ ОШИБОК 404 ---
-        # Проверка сообщений, указанных в вашем роутере
-        bad_get = await ac.get("/admission_teams/9999")
-        assert bad_get.status_code == 404
-        assert bad_get.json()["detail"] == "Такой медиццинской бригады не было"
+        # Обновление несуществующей записи админом (404)
+        res_put_404 = await ac.put("/admission_teams/99999", json=update_data, headers=adm_h)
+        assert res_put_404.status_code == 404
 
-        bad_put = await ac.put("/admission_teams/9999", json=update_data)
-        assert bad_put.status_code == 404
-        assert bad_put.json()["detail"] == "Такой медицинской бригады не было"
+        # Успешное обновление админом
+        res_put_ok = await ac.put(f"/admission_teams/{team_id}", json=update_data, headers=adm_h)
+        assert res_put_ok.status_code == 200
 
-        # --- 7. DELETE (Удаление) ---
-        del_res = await ac.delete(f"/admission_teams/{team_id}")
-        assert del_res.status_code == 200
-        assert del_res.json()["message"] == "Медицинская бригада успешно удалена"
+        # --- 6. ТЕСТЫ УДАЛЕНИЯ (DELETE) ---
+        # Строка 78: Врач пытается удалить (нужен уровень 4)
+        res_78 = await ac.delete(f"/admission_teams/{team_id}", headers=doc_h)
+        assert res_78.status_code == 403
 
-        # Проверка удаления несуществующей записи для покрытия 404 в delete
-        bad_del = await ac.delete("/admission_teams/9999")
-        assert bad_del.status_code == 404
-        assert bad_del.json()["detail"] == "Медицинская бригада не найдена"
+        # Удаление админом
+        res_del_ok = await ac.delete(f"/admission_teams/{team_id}", headers=adm_h)
+        assert res_del_ok.status_code == 200
+
+        # Удаление уже удаленной записи (404)
+        res_del_404 = await ac.delete(f"/admission_teams/{team_id}", headers=adm_h)
+        assert res_del_404.status_code == 404

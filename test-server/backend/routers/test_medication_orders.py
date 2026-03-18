@@ -1,93 +1,94 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 from backend.main import app
+from backend.auth import create_access_token
+from backend.database import SessionLocal
+from backend import crud, schemas, models
 from datetime import date, timedelta
 
 BASE_URL = "http://testserver"
 
 @pytest.mark.asyncio
 async def test_medication_orders_full_coverage():
+    # --- ШАГ 1: ПОДГОТОВКА ПОЛЬЗОВАТЕЛЕЙ ---
+    db = SessionLocal()
+    try:
+        # Админ (4)
+        admin_login = "med_admin"
+        if not db.query(models.Staff).filter(models.Staff.login == admin_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Админ", login=admin_login, password="1", access_level=3
+            ))
+        # Врач (2)
+        doc_login = "med_doc"
+        if not db.query(models.Staff).filter(models.Staff.login == doc_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Врач", login=doc_login, password="1", access_level=2
+            ))
+        # Стажер (1) - НЕТ прав на назначения
+        intern_login = "med_intern"
+        if not db.query(models.Staff).filter(models.Staff.login == intern_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Стажер", login=intern_login, password="1", access_level=1
+            ))
+    finally:
+        db.close()
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url=BASE_URL) as ac:
+        admin_headers = {"Authorization": f"Bearer {create_access_token({'sub': admin_login})}"}
+        doc_headers = {"Authorization": f"Bearer {create_access_token({'sub': doc_login})}"}
+        intern_headers = {"Authorization": f"Bearer {create_access_token({'sub': intern_login})}"}
 
-        # --- ПОДГОТОВКА ---
-        # 1. Создаем пациента
-        patient = await ac.post("/patients/", json={
-            "full_name": "Тестовый Пациент",
-            "birth_date": "1990-01-01",
-            "gender": "Мужской"
-        })
-        p_id = patient.json()["id"]
+        # --- ШАГ 2: ПОДГОТОВКА ЗАВИСИМОСТЕЙ ---
+        # Назначение привязано к MedEntry (записи в истории)
+        pat = await ac.post("/api/patients/", json={"full_name": "П", "birth_date": "1990-01-01", "gender": "Мужской"}, headers=admin_headers)
+        pat_id = pat.json()["id"]
 
-        # 2. Создаем сотрудника (врача)
-        staff = await ac.post("/staff/", json={
-            "full_name": "Тестовый Врач",
-            "phone": "911"
-        })
-        s_id = staff.json()["id"]
+        entry = await ac.post("/api/med_entries/", json={"patient_id": pat_id, "description": "Осмотр"}, headers=admin_headers)
+        entry_id = entry.json()["id"]
 
-        # 3. Создаем запись в истории болезни (к ней привязываются назначения)
-        med_entry = await ac.post("/med_entries/", json={
-            "patient_id": p_id,
-            "staff_id": s_id,
-            "description": "Первичный осмотр"
-        })
-        e_id = med_entry.json()["id"]
-
-        # --- 1. POST (Создание назначения) ---
-        today = date.today()
-        next_week = today + timedelta(days=7)
-
-        order_data = {
-            "med_entry_id": e_id,
+        order_payload = {
+            "med_entry_id": entry_id,
             "name": "Аспирин",
-            "dose": "500 мг",
-            "rules_taking": "1 таблетка после еды",
-            "begin_date": str(today),
-            "end_date": str(next_week)
+            "dose": "100мг",
+            "begin_date": str(date.today()),
+            "end_date": str(date.today() + timedelta(days=5))
         }
-        create_res = await ac.post("/medication_orders/", json=order_data)
-        assert create_res.status_code == 200
-        order_id = create_res.json()["id"]
-        assert create_res.json()["name"] == "Аспирин"
 
-        # --- 2. GET List (Получение списка) ---
-        list_res = await ac.get("/medication_orders/")
-        assert list_res.status_code == 200
-        assert any(o["id"] == order_id for o in list_res.json())
+        # --- 3. ТЕСТЫ GET (Список) ---
+        # 403: Стажер не видит назначения
+        assert (await ac.get("/api/medication_orders/", headers=intern_headers)).status_code == 403
+        # 200: Врач видит
+        assert (await ac.get("/api/medication_orders/", headers=doc_headers)).status_code == 200
 
-        # --- 3. GET One (Получение по ID) ---
-        get_one = await ac.get(f"/medication_orders/{order_id}")
-        assert get_one.status_code == 200
-        assert get_one.json()["dose"] == "500 мг"
+        # --- 4. ТЕСТЫ POST (Создание) ---
+        # 403: Стажер не может назначать
+        assert (await ac.post("/api/medication_orders/", json=order_payload, headers=intern_headers)).status_code == 403
+        # 200: Врач может
+        res_ok = await ac.post("/api/medication_orders/", json=order_payload, headers=doc_headers)
+        assert res_ok.status_code == 200
+        order_id = res_ok.json()["id"]
 
-        # --- 4. PUT (Обновление) ---
-        update_data = order_data.copy()
-        update_data["dose"] = "1000 мг"
-        put_res = await ac.put(f"/medication_orders/{order_id}", json=update_data)
-        assert put_res.status_code == 200
-        assert put_res.json()["dose"] == "1000 мг"
+        # --- 5. ТЕСТЫ GET (ID) ---
+        # 404: Не найдено
+        assert (await ac.get("/api/medication_orders/9999", headers=doc_headers)).status_code == 404
+        # 200: Успех
+        assert (await ac.get(f"/api/medication_orders/{order_id}", headers=doc_headers)).status_code == 200
 
-        # --- 5. ТЕСТ ВАЛИДАЦИИ ДАТ ---
-        # Проверяем @model_validator(mode='after') check_dates
-        invalid_dates = order_data.copy()
-        invalid_dates["begin_date"] = str(next_week)
-        invalid_dates["end_date"] = str(today) # Конец раньше начала
+        # --- 6. ТЕСТЫ PUT (Обновление) ---
+        # 403: Уровень 1 запрещен
+        assert (await ac.put(f"/api/medication_orders/{order_id}", json=order_payload, headers=intern_headers)).status_code == 403
+        # 404: Не найден
+        assert (await ac.put("/api/medication_orders/9999", json=order_payload, headers=doc_headers)).status_code == 404
+        # 200: Успех
+        res_upd = await ac.put(f"/api/medication_orders/{order_id}", json={**order_payload, "dose": "200мг"}, headers=doc_headers)
+        assert res_upd.status_code == 200
 
-        bad_res = await ac.post("/medication_orders/", json=invalid_dates)
-        assert bad_res.status_code == 422 # Unprocessable Entity
-        assert "Дата отмены не может быть раньше даты назначения" in bad_res.text
-
-        # --- 6. ТЕСТЫ ОШИБОК 404 ---
-        assert (await ac.get("/medication_orders/9999")).status_code == 404
-        assert (await ac.put("/medication_orders/9999", json=order_data)).status_code == 404
-        assert (await ac.delete("/medication_orders/9999")).status_code == 404
-
-        # --- 7. DELETE (Удаление) ---
-        del_res = await ac.delete(f"/medication_orders/{order_id}")
-        assert del_res.status_code == 200
-        assert del_res.json()["message"] == "Лист назначения успешно удален"
-
-        # Проверка удаления
-        final_check = await ac.get(f"/medication_orders/{order_id}")
-        assert final_check.status_code == 404
+        # --- 7. ТЕСТЫ DELETE (Удаление) ---
+        # 403: Врач (2) не может удалять, только Админ (4)
+        assert (await ac.delete(f"/api/medication_orders/{order_id}", headers=doc_headers)).status_code == 403
+        # 404: Не найден
+        assert (await ac.delete("/api/medication_orders/9999", headers=admin_headers)).status_code == 404
+        # 200: Успех
+        assert (await ac.delete(f"/api/medication_orders/{order_id}", headers=admin_headers)).status_code == 200

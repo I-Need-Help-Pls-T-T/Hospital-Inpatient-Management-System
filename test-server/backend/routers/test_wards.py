@@ -1,80 +1,108 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 from backend.main import app
-from datetime import datetime
+from backend.auth import create_access_token
+from backend.database import SessionLocal
+from backend import crud, schemas, models
 
 BASE_URL = "http://testserver"
 
 @pytest.mark.asyncio
 async def test_wards_full_coverage():
-    # Используем ASGITransport для обращения к нашему FastAPI приложению
+    # --- ШАГ 1: ПОДГОТОВКА ПОЛЬЗОВАТЕЛЕЙ В БД ---
+    db = SessionLocal()
+    try:
+        # Администратор (уровень 4) для создания/удаления
+        admin_login = "ward_admin"
+        if not db.query(models.Staff).filter(models.Staff.login == admin_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Админ Палат", login=admin_login, password="123", access_level=3
+            ))
+
+        # Обычный врач (уровень 1) только для чтения
+        doc_login = "ward_doctor"
+        if not db.query(models.Staff).filter(models.Staff.login == doc_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Врачи", login=doc_login, password="123", access_level=1
+            ))
+
+        # Пользователь без прав (уровень 0)
+        zero_login = "ward_zero"
+        if not db.query(models.Staff).filter(models.Staff.login == zero_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Никто", login=zero_login, password="123", access_level=0
+            ))
+    finally:
+        db.close()
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url=BASE_URL) as ac:
 
-        # --- ПОДГОТОВКА ---
-        # Палата (Ward) в вашей схеме данных зависит от Room, а та от Department.
-        # Создаем их, чтобы не зависеть от состояния БД
-        dep_res = await ac.post("/departments/", json={"name": "Хирургия"})
+        # --- 2. ПОДГОТОВКА ТОКЕНОВ ---
+        admin_headers = {"Authorization": f"Bearer {create_access_token({'sub': admin_login})}"}
+        doc_headers = {"Authorization": f"Bearer {create_access_token({'sub': doc_login})}"}
+        zero_headers = {"Authorization": f"Bearer {create_access_token({'sub': zero_login})}"}
+
+        # --- 3. ПОДГОТОВКА СТРУКТУРЫ (Отделение и Комната) ---
+        # Делаем это под админом
+        dep_res = await ac.post("/api/departments/", json={"name": "Терапия"}, headers=admin_headers)
         dep_id = dep_res.json()["id"]
 
-        room_res = await ac.post("/rooms/", json={
-             "number": 202,
-             "type": "Палата",
-             "capacity": 2,
-             "department_id": dep_id
-        })
+        room_res = await ac.post("/api/rooms/", json={
+             "number": 303, "type": "Палата", "capacity": 4, "department_id": dep_id
+        }, headers=admin_headers)
         room_id = room_res.json()["id"]
 
-        # --- 1. POST (Создание) ---
-        # ВНИМАНИЕ: убедитесь, что в WardCreate нет поля id (как мы исправляли ранее)
-        ward_data = {
-            "room_id": room_id,
-            "w_place": 2,
-            "m_place": 0
-        }
-        create_res = await ac.post("/wards/", json=ward_data)
-        assert create_res.status_code == 200
-        ward_id = create_res.json()["id"]
+        # --- 4. ТЕСТЫ СОЗДАНИЯ (POST) ---
+        ward_payload = {"room_id": room_id, "w_place": 2, "m_place": 2}
 
-        # --- 2. GET List (Список) ---
-        list_res = await ac.get("/wards/")
-        assert list_res.status_code == 200
-        assert any(w["id"] == ward_id for w in list_res.json())
+        # Ошибка: недостаточно прав (уровень 1 < 4)
+        res_fail = await ac.post("/api/wards/", json=ward_payload, headers=doc_headers)
+        assert res_fail.status_code == 403
 
-        # --- 3. GET One (Получение по ID) ---
-        get_one = await ac.get(f"/wards/{ward_id}")
-        assert get_one.status_code == 200
-        assert get_one.json()["room_id"] == room_id
+        # Успех: админ
+        res_ok = await ac.post("/api/wards/", json=ward_payload, headers=admin_headers)
+        assert res_ok.status_code == 200
+        ward_id = res_ok.json()["id"]
 
-        # --- 4. PUT (Обновление) ---
-        update_data = {
-            "room_id": room_id,
-            "w_place": 1,
-            "m_place": 1
-        }
-        put_res = await ac.put(f"/wards/{ward_id}", json=update_data)
-        assert put_res.status_code == 200
-        assert put_res.json()["m_place"] == 1
+        # --- 5. ТЕСТЫ ЧТЕНИЯ (GET) ---
+        # Успех: врач может видеть список
+        res_list = await ac.get("/api/wards/", headers=doc_headers)
+        assert res_list.status_code == 200
 
-        # --- 5. GET 404 (Ошибка: не найдено) ---
-        bad_get = await ac.get("/wards/99999")
-        assert bad_get.status_code == 404
-        assert bad_get.json()["detail"] == "Палата не найдена"
+        # Ошибка: уровень 0 не может видеть
+        res_zero_list = await ac.get("/api/wards/", headers=zero_headers)
+        assert res_zero_list.status_code == 403
 
-        # --- 6. DELETE (Удаление) ---
-        del_res = await ac.delete(f"/wards/{ward_id}")
-        assert del_res.status_code == 200
+        # Получение конкретной палата (успех)
+        res_one = await ac.get(f"/api/wards/{ward_id}", headers=doc_headers)
+        assert res_one.status_code == 200
 
-        # Проверка удаления
-        after_del = await ac.get(f"/wards/{ward_id}")
-        assert after_del.status_code == 404
+        # Ошибка 404
+        res_404 = await ac.get("/api/wards/99999", headers=doc_headers)
+        assert res_404.status_code == 404
 
-        # --- 7. PUT 404 (Ошибка обновления несуществующей палаты) ---
-        bad_put = await ac.put("/wards/99999", json=update_data)
-        assert bad_put.status_code == 404
-        assert bad_put.json()["detail"] == "Палата не найдена"
+        # --- 6. ТЕСТЫ ОБНОВЛЕНИЯ (PUT) ---
+        update_data = {"room_id": room_id, "w_place": 5, "m_place": 0}
 
-        # --- 8. DELETE 404 (Ошибка удаления несуществующей палаты) ---
-        bad_del = await ac.delete("/wards/99999")
-        assert bad_del.status_code == 404
-        assert bad_del.json()["detail"] == "Палата не найдена"
+        # Ошибка 404 для PUT
+        res_put_404 = await ac.put("/api/wards/99999", json=update_data, headers=admin_headers)
+        assert res_put_404.status_code == 404
+
+        # Успешное обновление
+        res_put_ok = await ac.put(f"/api/wards/{ward_id}", json=update_data, headers=admin_headers)
+        assert res_put_ok.status_code == 200
+        assert res_put_ok.json()["w_place"] == 5
+
+        # --- 7. ТЕСТЫ УДАЛЕНИЯ (DELETE) ---
+        # Ошибка: врач не может удалять
+        res_del_fail = await ac.delete(f"/api/wards/{ward_id}", headers=doc_headers)
+        assert res_del_fail.status_code == 403
+
+        # Успех: админ удаляет
+        res_del_ok = await ac.delete(f"/api/wards/{ward_id}", headers=admin_headers)
+        assert res_del_ok.status_code == 200
+
+        # Ошибка 404 при повторном удалении
+        res_del_404 = await ac.delete(f"/api/wards/{ward_id}", headers=admin_headers)
+        assert res_del_404.status_code == 404

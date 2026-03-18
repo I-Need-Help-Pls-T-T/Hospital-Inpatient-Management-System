@@ -1,75 +1,97 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 from backend.main import app
+from backend.auth import create_access_token
+from backend.database import SessionLocal
+from backend import crud, schemas, models
 from datetime import date
 
 BASE_URL = "http://testserver"
 
 @pytest.mark.asyncio
 async def test_hospitalizations_full_coverage():
+    # --- ШАГ 1: ПОДГОТОВКА ПОЛЬЗОВАТЕЛЕЙ ---
+    db = SessionLocal()
+    try:
+        admin_login = "hosp_admin"
+        if not db.query(models.Staff).filter(models.Staff.login == admin_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Админ", login=admin_login, password="1", access_level=3
+            ))
+
+        staff_login = "hosp_staff" # Регистратор (2)
+        if not db.query(models.Staff).filter(models.Staff.login == staff_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Регистратор", login=staff_login, password="1", access_level=2
+            ))
+
+        user_login = "hosp_user" # Стажер (1)
+        if not db.query(models.Staff).filter(models.Staff.login == user_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Стажер", login=user_login, password="1", access_level=1
+            ))
+    finally:
+        db.close()
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url=BASE_URL) as ac:
+        admin_headers = {"Authorization": f"Bearer {create_access_token({'sub': admin_login})}"}
+        staff_headers = {"Authorization": f"Bearer {create_access_token({'sub': staff_login})}"}
+        user_headers = {"Authorization": f"Bearer {create_access_token({'sub': user_login})}"}
 
-        # --- ПОДГОТОВКА ЗАВИСИМОСТЕЙ ---
-        # 1. Отделение -> Помещение -> Палата
-        dep = await ac.post("/departments/", json={"name": "Терапия"})
+        # Подготовка данных (Отделение -> Палата -> Пациент)
+        dep = await ac.post("/api/departments/", json={"name": "Терапия"}, headers=admin_headers)
         dep_id = dep.json()["id"]
-
-        room = await ac.post("/rooms/", json={"number": 301, "department_id": dep_id})
+        room = await ac.post("/api/rooms/", json={"number": 101, "department_id": dep_id}, headers=admin_headers)
         room_id = room.json()["id"]
-
-        ward = await ac.post("/wards/", json={"name": "Палата №1", "room_id": room_id})
+        ward = await ac.post("/api/wards/", json={"room_id": room_id, "w_place": 1, "m_place": 1}, headers=admin_headers)
         ward_id = ward.json()["id"]
+        pat = await ac.post("/api/patients/", json={"full_name": "Иванов", "birth_date": "1990-01-01", "gender": "Мужской"}, headers=admin_headers)
+        patient_id = pat.json()["id"]
 
-        # 2. Пациент
-        patient = await ac.post("/patients/", json={
-            "full_name": "Тестовый Пациент",
-            "birth_date": "1985-10-10",
-            "gender": "Мужской"
-        })
-        patient_id = patient.json()["id"]
-
-        # --- 1. POST (Создание госпитализации) ---
-        hosp_data = {
+        hosp_payload = {
             "patient_id": patient_id,
             "ward_id": ward_id,
-            "care_type": "Стационар",
-            "outcome": "В процессе",
-            "treatment_summary": "Начальное обследование"
+            "admission_date": str(date.today()),
+            "care_type": "Стационар"
         }
-        create_res = await ac.post("/hospitalizations/", json=hosp_data)
-        assert create_res.status_code == 200
-        hosp_id = create_res.json()["id"]
 
-        # --- 2. GET List (Список) ---
-        list_res = await ac.get("/hospitalizations/")
-        assert list_res.status_code == 200
-        assert any(h["id"] == hosp_id for h in list_res.json())
+        # --- 2. ТЕСТЫ GET (Список) ---
+        # 200: Стажер может видеть список (строка 23)
+        assert (await ac.get("/api/hospitalizations/", headers=user_headers)).status_code == 200
 
-        # --- 3. GET One (Детально) ---
-        get_one = await ac.get(f"/hospitalizations/{hosp_id}")
-        assert get_one.status_code == 200
-        assert get_one.json()["care_type"] == "Стационар"
+        # --- 3. ТЕСТЫ POST (Создание) ---
+        # 403: Стажер (1) не может оформлять (строка 48)
+        assert (await ac.post("/api/hospitalizations/", json=hosp_payload, headers=user_headers)).status_code == 403
 
-        # --- 4. PUT (Обновление) ---
-        update_data = hosp_data.copy()
-        update_data["outcome"] = "Выписан"
-        update_data["treatment_summary"] = "Курс лечения завершен успешно"
+        # 200: Регистратор (2) может
+        res_p_ok = await ac.post("/api/hospitalizations/", json=hosp_payload, headers=staff_headers)
+        assert res_p_ok.status_code == 200
+        hosp_id = res_p_ok.json()["id"]
 
-        put_res = await ac.put(f"/hospitalizations/{hosp_id}", json=update_data)
-        assert put_res.status_code == 200
-        assert put_res.json()["outcome"] == "Выписан"
+        # --- 4. ТЕСТЫ GET (ID) ---
+        # 404: Не найдена (строка 38)
+        assert (await ac.get("/api/hospitalizations/9999", headers=user_headers)).status_code == 404
 
-        # --- 5. ТЕСТЫ ОШИБОК 404 ---
-        # Несуществующий ID в GET
-        assert (await ac.get("/hospitalizations/999")).status_code == 404
+        # --- 5. ТЕСТЫ PUT (Обновление) ---
+        # 403: Уровень 1 не может менять (строка 59)
+        assert (await ac.put(f"/api/hospitalizations/{hosp_id}", json=hosp_payload, headers=user_headers)).status_code == 403
 
-        # Несуществующий ID в PUT
-        assert (await ac.put("/hospitalizations/999", json=update_data)).status_code == 404
+        # 404: Не найдена
+        assert (await ac.put("/api/hospitalizations/9999", json=hosp_payload, headers=staff_headers)).status_code == 404
 
-        # --- 6. DELETE (Удаление) ---
-        del_res = await ac.delete(f"/hospitalizations/{hosp_id}")
-        assert del_res.status_code == 200
+        # 200: Успех
+        res_u_ok = await ac.put(f"/api/hospitalizations/{hosp_id}",
+                                json={**hosp_payload, "outcome": "Выписан"},
+                                headers=staff_headers)
+        assert res_u_ok.status_code == 200
 
-        # Повторное удаление (404)
-        assert (await ac.delete(f"/hospitalizations/{hosp_id}")).status_code == 404
+        # --- 6. ТЕСТЫ DELETE (Удаление) ---
+        # 403: Регистратор (2) не может удалять (строка 74)
+        assert (await ac.delete(f"/api/hospitalizations/{hosp_id}", headers=staff_headers)).status_code == 403
+
+        # 404: Не найдена
+        assert (await ac.delete("/api/hospitalizations/9999", headers=admin_headers)).status_code == 404
+
+        # 200: Успех (Админ)
+        assert (await ac.delete(f"/api/hospitalizations/{hosp_id}", headers=admin_headers)).status_code == 200

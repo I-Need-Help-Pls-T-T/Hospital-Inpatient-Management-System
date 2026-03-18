@@ -47,7 +47,6 @@ class Position(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
     med_education = Column(Boolean, default=True)
-    lvl_responsibility = Column(Integer)
     description = Column(Text)
 
     # Связи
@@ -120,6 +119,9 @@ class Staff(Base):
     email = Column(String(100))
     condition = Column(Enum(StaffCondition), default=StaffCondition.Активен)
     room_id = Column(Integer, ForeignKey("room.id", ondelete="SET NULL"))
+    login = Column(String(50), unique=True, nullable=True)
+    password_hash = Column(String(255), nullable=True)
+    access_level = Column(Integer, default=0)
 
     # Связи
     room = relationship("Room", back_populates="staff")
@@ -168,7 +170,7 @@ class Hospitalization(Base):
 
     @property
     def is_paid(self):
-        return self.payments is not None
+        return len(self.payments) > 0
 
 
 class PatientAdmission(Base):
@@ -257,3 +259,26 @@ class Payment(Base):
 
     # Связи
     hospitalization = relationship("Hospitalization", back_populates="payments")
+
+class FeedbackType(enum.Enum):
+    Ошибка = "Ошибка"
+    Предложение = "Предложение"
+    Вопрос = "Вопрос"
+
+class Feedback(Base):
+    """
+    Обратная связь / сообщения об ошибках от пользователей
+    """
+    __tablename__ = "feedback"
+
+    id = Column(Integer, primary_key=True, index=True)
+    staff_id = Column(Integer, ForeignKey("staff.id", ondelete="SET NULL"), nullable=True)
+    subject = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    feedback_type = Column(Enum(FeedbackType), default=FeedbackType.Ошибка)
+    section = Column(String(100))
+    created_at = Column(TIMESTAMP, default=datetime.now)
+    is_read = Column(Boolean, default=False)
+
+    # Связи
+    staff = relationship("Staff")

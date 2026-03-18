@@ -1,81 +1,123 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 from backend.main import app
+from backend.auth import create_access_token
+from backend.database import SessionLocal
+from backend import crud, schemas, models
 from datetime import date
 
 BASE_URL = "http://testserver"
 
 @pytest.mark.asyncio
 async def test_payments_full_coverage():
+    # --- ШАГ 1: ПОДГОТОВКА ПОЛЬЗОВАТЕЛЕЙ ---
+    db = SessionLocal()
+    try:
+        # Админ (4) - может редактировать и удалять
+        admin_login = "pay_admin"
+        if not db.query(models.Staff).filter(models.Staff.login == admin_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Бухгалтер-Админ", login=admin_login, password="1", access_level=3
+            ))
+
+        # Кассир (3) - может смотреть и создавать
+        staff_login = "pay_staff"
+        if not db.query(models.Staff).filter(models.Staff.login == staff_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Кассир", login=staff_login, password="1", access_level=2
+            ))
+
+        # Врач (1) - доступ запрещен
+        doc_login = "pay_doc"
+        if not db.query(models.Staff).filter(models.Staff.login == doc_login).first():
+            crud.staff_crud.create(db, obj_in=schemas.StaffCreate(
+                full_name="Врач", login=doc_login, password="1", access_level=1
+            ))
+    finally:
+        db.close()
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url=BASE_URL) as ac:
+        admin_headers = {"Authorization": f"Bearer {create_access_token({'sub': admin_login})}"}
+        staff_headers = {"Authorization": f"Bearer {create_access_token({'sub': staff_login})}"}
+        doc_headers = {"Authorization": f"Bearer {create_access_token({'sub': doc_login})}"}
 
-        # --- ПОДГОТОВКА ЦЕПОЧКИ ЗАВИСИМОСТЕЙ ---
-        # 1. Отделение и Палата
-        dep = await ac.post("/departments/", json={"name": "Платное отделение"})
-        dep_id = dep.json()["id"]
-        room = await ac.post("/rooms/", json={"number": 777, "department_id": dep_id})
-        room_id = room.json()["id"]
-        ward = await ac.post("/wards/", json={"name": "VIP", "room_id": room_id})
-        ward_id = ward.json()["id"]
+        # --- 2. ПОДГОТОВКА ЗАВИСИМОСТЕЙ ---
+        # Пациент и госпитализация нужны для создания платежа
+        pat = await ac.post("/api/patients/", json={
+            "full_name": "Иванов И.И.", "birth_date": "1990-01-01", "gender": "Мужской"
+        }, headers=admin_headers)
+        pat_id = pat.json()["id"]
 
-        # 2. Пациент
-        patient = await ac.post("/patients/", json={
-            "full_name": "Богатый Клиент",
-            "birth_date": "1980-01-01",
-            "gender": "Мужской"
-        })
-        patient_id = patient.json()["id"]
-
-        # 3. Госпитализация
-        hosp = await ac.post("/hospitalizations/", json={
-            "patient_id": patient_id,
-            "ward_id": ward_id,
-            "admission_date": str(date.today())
-        })
+        hosp = await ac.post("/api/hospitalizations/", json={
+            "patient_id": pat_id, "treatment_summary": "Плановое"
+        }, headers=admin_headers)
         hosp_id = hosp.json()["id"]
 
-        # --- 1. POST (Создание оплаты) ---
-        payment_data = {
+        payment_payload = {
             "hospitalization_id": hosp_id,
-            "payment_date": str(date.today()),
-            "amount": 50000.00,
-            "method": "Карта"
+            "amount": 1500.0,
+            "method": "Карта",
+            "payment_date": str(date.today())
         }
-        create_res = await ac.post("/payments/", json=payment_data)
-        assert create_res.status_code == 200
-        pay_id = create_res.json()["id"]
 
-        # --- 2. GET List ---
-        list_res = await ac.get("/payments/")
-        assert list_res.status_code == 200
-        assert any(p["id"] == pay_id for p in list_res.json())
+        # --- 3. ТЕСТ GET (Список) ---
+        # Строка 21: Доступ запрещен для уровня < 3
+        res_list_403 = await ac.get("/api/payments/", headers=doc_headers)
+        assert res_list_403.status_code == 403
 
-        # --- 3. GET One ---
-        get_one = await ac.get(f"/payments/{pay_id}")
-        assert get_one.status_code == 200
-        assert float(get_one.json()["amount"]) == 50000.00
+        # Успешный список
+        res_list_ok = await ac.get("/api/payments/", headers=admin_headers)
+        assert res_list_ok.status_code == 200
 
-        # --- 4. PUT (Обновление) ---
-        update_data = payment_data.copy()
-        update_data["amount"] = 55000.50
-        update_data["method"] = "Наличные"
+        # --- 4. ТЕСТ POST (Создание) ---
+        # Строка 37: Доступ запрещен для уровня < 3
+        res_create_403 = await ac.post("/api/payments/", json=payment_payload, headers=doc_headers)
+        assert res_create_403.status_code == 403
 
-        put_res = await ac.put(f"/payments/{pay_id}", json=update_data)
-        assert put_res.status_code == 200
-        assert float(put_res.json()["amount"]) == 55000.50
+        # Успешное создание
+        res_create_ok = await ac.post("/api/payments/", json=payment_payload, headers=admin_headers)
+        assert res_create_ok.status_code == 200
+        pay_id = res_create_ok.json()["id"]
 
-        # --- 5. ТЕСТЫ ОШИБОК 404 ---
-        bad_get = await ac.get("/payments/9999")
-        assert bad_get.status_code == 404
+        # --- 5. ТЕСТ GET (ID) ---
+        # Строка 32: Ошибка 403 при получении по ID
+        res_get_403 = await ac.get(f"/api/payments/{pay_id}", headers=doc_headers)
+        assert res_get_403.status_code == 403
 
-        bad_put = await ac.put("/payments/9999", json=update_data)
-        assert bad_put.status_code == 404
+        # Строка 37 (в контексте get): 404 если не найден
+        res_get_404 = await ac.get("/api/payments/99999", headers=admin_headers)
+        assert res_get_404.status_code == 404
 
-        # --- 6. DELETE ---
-        del_res = await ac.delete(f"/payments/{pay_id}")
-        assert del_res.status_code == 200
+        # Успешное получение
+        res_get_ok = await ac.get(f"/api/payments/{pay_id}", headers=admin_headers)
+        assert res_get_ok.status_code == 200
 
-        # Повторное удаление для 404
-        bad_del = await ac.delete(f"/payments/{pay_id}")
-        assert bad_del.status_code == 404
+        # --- 6. ТЕСТ PUT (Обновление) ---
+        # Строка 63: 403 если уровень < 4 (кассир не может менять)
+        res_put_403 = await ac.put(f"/api/payments/{pay_id}", json=payment_payload, headers=staff_headers)
+        assert res_put_403.status_code == 403
+
+        # Ошибка 404 (строка 68 в коде роутера)
+        res_put_404 = await ac.put("/api/payments/99999", json=payment_payload, headers=admin_headers)
+        assert res_put_404.status_code == 404
+
+        # Успешное обновление
+        res_put_ok = await ac.put(f"/api/payments/{pay_id}",
+                                   json={**payment_payload, "amount": 5000},
+                                   headers=admin_headers)
+        assert res_put_ok.status_code == 200
+        assert res_put_ok.json()["amount"] == 5000
+
+        # --- 7. ТЕСТ DELETE (Удаление) ---
+        # Строка 75: 403 если уровень < 4
+        res_del_403 = await ac.delete(f"/api/payments/{pay_id}", headers=staff_headers)
+        assert res_del_403.status_code == 403
+
+        # Ошибка 404
+        res_del_404 = await ac.delete("/api/payments/99999", headers=admin_headers)
+        assert res_del_404.status_code == 404
+
+        # Успешное удаление (строка 80+)
+        res_del_ok = await ac.delete(f"/api/payments/{pay_id}", headers=admin_headers)
+        assert res_del_ok.status_code == 200

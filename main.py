@@ -1,23 +1,28 @@
 import sys
-import subprocess
-import time
-import threading
-from frontend.mainwindow import MainWindow
-from PySide6.QtWidgets import QApplication
+import os
 
-def run_server():
-    try:
-        subprocess.run(["python", "backend/main.py"])
-    except Exception as e:
-        print(f"Ошибка запуска сервера: {e}")
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+from PySide6.QtWidgets import QApplication, QDialog
+from frontend.api_client import APIClient
+from frontend.main_gui import LoginDialog
+from frontend.mainwindow import MainWindow
+
+def main():
+    app = QApplication(sys.argv)
+
+    client = APIClient(base_url="http://127.0.0.1:8080")
+
+    login_dialog = LoginDialog(client)
+
+    if login_dialog.exec() == QDialog.Accepted:
+        window = MainWindow(api_client=client)
+        window.show()
+        sys.exit(app.exec())
+    else:
+        sys.exit(0)
 
 if __name__ == "__main__":
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-
-    time.sleep(2)
-
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+    main()
